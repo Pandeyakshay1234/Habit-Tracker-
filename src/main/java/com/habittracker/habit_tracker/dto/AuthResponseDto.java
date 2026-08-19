@@ -1,6 +1,6 @@
 package com.habittracker.habit_tracker.dto;
 
-public record AuthResponse(
+public record AuthResponseDto(
         String token,
         Long userId,
         String name,

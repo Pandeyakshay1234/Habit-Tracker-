@@ -2,7 +2,7 @@ package com.habittracker.habit_tracker.dto;
 
 import java.time.LocalDateTime;
 
-public record HabitResponse(
+public record HabitResponseDto(
         Long id,
         String name,
         String description,

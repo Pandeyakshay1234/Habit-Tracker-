@@ -1,7 +1,7 @@
 package com.habittracker.habit_tracker.service;
 
-import com.habittracker.habit_tracker.dto.HabitRequest;
-import com.habittracker.habit_tracker.dto.HabitResponse;
+import com.habittracker.habit_tracker.dto.HabitRequestDto;
+import com.habittracker.habit_tracker.dto.HabitResponseDto;
 import com.habittracker.habit_tracker.entity.Habit;
 import com.habittracker.habit_tracker.entity.HabitLog;
 import com.habittracker.habit_tracker.entity.User;
@@ -42,7 +42,7 @@ public class HabitService {
     // 1. CREATE HABIT
     // ─────────────────────────────────────────────────────────────
     @Transactional                              // Saves data safely in a database transaction
-    public HabitResponse createHabit(HabitRequest request, String userEmail) {
+    public HabitResponseDto createHabit(HabitRequestDto request, String userEmail) {
         // Step 1: Find the logged-in user from DB using their email (from JWT token)
         User user = userRepository.findByEmail(userEmail)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found with email: " + userEmail));
@@ -65,7 +65,7 @@ public class HabitService {
     // 2. GET ALL HABITS OF LOGGED-IN USER
     // ─────────────────────────────────────────────────────────────
     @Transactional(readOnly = true)             // Read-only transaction (faster, no dirty checking)
-    public List<HabitResponse> getAllUserHabits(String userEmail) {
+    public List<HabitResponseDto> getAllUserHabits(String userEmail) {
         // Step 1: Find the logged-in user
         User user = userRepository.findByEmail(userEmail)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found with email: " + userEmail));
@@ -74,7 +74,7 @@ public class HabitService {
         List<Habit> habits = habitRepository.findByUserId(user.getId());
 
         // Step 3: Loop through each habit, calculate streaks, and build the response list
-        List<HabitResponse> responseList = new ArrayList<>();
+        List<HabitResponseDto> responseList = new ArrayList<>();
         for (Habit habit : habits) {
             int currentStreak = calculateCurrentStreak(habit.getId());
             int longestStreak = calculateLongestStreak(habit.getId());
@@ -89,7 +89,7 @@ public class HabitService {
     // 3. GET SINGLE HABIT BY ID
     // ─────────────────────────────────────────────────────────────
     @Transactional(readOnly = true)
-    public HabitResponse getHabitById(Long habitId, String userEmail) {
+    public HabitResponseDto getHabitById(Long habitId, String userEmail) {
         // Step 1: Find the logged-in user
         User user = userRepository.findByEmail(userEmail)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found with email: " + userEmail));
@@ -110,7 +110,7 @@ public class HabitService {
     // 4. UPDATE HABIT
     // ─────────────────────────────────────────────────────────────
     @Transactional
-    public HabitResponse updateHabit(Long habitId, HabitRequest request, String userEmail) {
+    public HabitResponseDto updateHabit(Long habitId, HabitRequestDto request, String userEmail) {
         // Step 1: Find the logged-in user
         User user = userRepository.findByEmail(userEmail)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found with email: " + userEmail));
@@ -239,8 +239,8 @@ public class HabitService {
     // ─────────────────────────────────────────────────────────────
     // 8. HELPER: CONVERT ENTITY TO RESPONSE DTO
     // ─────────────────────────────────────────────────────────────
-    private HabitResponse mapToResponse(Habit habit, int currentStreak, int longestStreak) {
-        return new HabitResponse(
+    private HabitResponseDto mapToResponse(Habit habit, int currentStreak, int longestStreak) {
+        return new HabitResponseDto(
                 habit.getId(),
                 habit.getName(),
                 habit.getDescription(),

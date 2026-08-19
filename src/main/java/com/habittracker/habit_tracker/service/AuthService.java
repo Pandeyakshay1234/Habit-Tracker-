@@ -1,8 +1,8 @@
 package com.habittracker.habit_tracker.service;
 
-import com.habittracker.habit_tracker.dto.AuthResponse;
-import com.habittracker.habit_tracker.dto.LoginRequest;
-import com.habittracker.habit_tracker.dto.RegisterRequest;
+import com.habittracker.habit_tracker.dto.AuthResponseDto;
+import com.habittracker.habit_tracker.dto.LoginRequestDto;
+import com.habittracker.habit_tracker.dto.RegisterRequestDto;
 import com.habittracker.habit_tracker.entity.User;
 import com.habittracker.habit_tracker.exception.DuplicateResourceException;
 import com.habittracker.habit_tracker.exception.ResourceNotFoundException;
@@ -59,13 +59,13 @@ public class AuthService {
      *   2. Hash plain-text password using BCrypt
      *   3. Build User entity and save to MySQL
      *   4. Generate JWT token for the new user
-     *   5. Return AuthResponse containing token and user profile
+     *   5. Return AuthResponseDto containing token and user profile
      *
      * @param request the registration details (name, email, password)
-     * @return AuthResponse with JWT and user information
+     * @return AuthResponseDto with JWT and user information
      */
     @Transactional                              // Ensures the registration database operation is executed within a transaction
-    public AuthResponse register(RegisterRequest request) {
+    public AuthResponseDto register(RegisterRequestDto request) {
 
         // Normalize email to lowercase and trim whitespace to prevent duplicates with different casing
         String normalizedEmail = request.email().toLowerCase().trim();
@@ -92,8 +92,8 @@ public class AuthService {
         // Generate a new signed JWT token for this user
         String token = jwtUtil.generateToken(userDetails);
 
-        // Return AuthResponse DTO containing JWT and user profile info
-        return new AuthResponse(
+        // Return AuthResponseDto containing JWT and user profile info
+        return new AuthResponseDto(
                 token,                                                      // Generated JWT token
                 savedUser.getId(),                                          // Database auto-generated primary key
                 savedUser.getName(),                                        // User's display name
@@ -113,13 +113,13 @@ public class AuthService {
      *   1. Delegate credential verification to Spring Security's AuthenticationManager
      *   2. Fetch User entity from MySQL DB
      *   3. Generate a fresh JWT token
-     *   4. Return AuthResponse containing token and user profile
+     *   4. Return AuthResponseDto containing token and user profile
      *
      * @param request the login credentials (email, password)
-     * @return AuthResponse with JWT and user information
+     * @return AuthResponseDto with JWT and user information
      */
     @Transactional(readOnly = true)             // Optimizes transaction for read-only database query
-    public AuthResponse login(LoginRequest request) {
+    public AuthResponseDto login(LoginRequestDto request) {
 
         // Normalize email to match registration casing
         String normalizedEmail = request.email().toLowerCase().trim();
@@ -143,8 +143,8 @@ public class AuthService {
         // Generate a fresh JWT token for this login session
         String token = jwtUtil.generateToken(userDetails);
 
-        // Return AuthResponse DTO containing JWT and user profile info
-        return new AuthResponse(
+        // Return AuthResponseDto containing JWT and user profile info
+        return new AuthResponseDto(
                 token,                                                      // Freshly generated JWT token
                 user.getId(),                                               // User's ID
                 user.getName(),                                             // User's display name
