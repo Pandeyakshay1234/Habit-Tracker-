@@ -924,6 +924,520 @@ git commit -m "Step 9: Add JwtAuthenticationFilter - JWT validation on every req
 
 ---
 
-> **Next:** Step 10 — `SecurityConfig.java` (wire the filter into Spring Security, define public vs protected routes)
+## Phase 1 · Step 10 — Spring Security Configuration (`SecurityConfig.java`)
 
 ---
+
+### 1. The Big Picture: What `SecurityConfig` Does
+
+`SecurityConfig` is the **central nervous system** of Spring Security in our application.
+
+It brings together all security components we built in Steps 7, 8, and 9:
+- `JwtUtil` (token parsing & validation)
+- `CustomUserDetailsService` (DB user lookup)
+- `JwtAuthenticationFilter` (request gatekeeper)
+
+And configures:
+1. **Which routes are public vs protected**
+2. **Stateless session policy** (no server-side HTTP sessions)
+3. **CSRF disabled** (safe for stateless JWT APIs)
+4. **Filter positioning** (`JwtAuthenticationFilter` before `UsernamePasswordAuthenticationFilter`)
+5. **Spring Security Beans** (`PasswordEncoder`, `AuthenticationProvider`, `AuthenticationManager`)
+
+---
+
+### 2. Spring Security 6 vs Older Versions: The Architecture Shift
+
+In older Spring Boot 2.x / Spring Security 5.x apps:
+```java
+// ❌ DEPRECATED & REMOVED in Spring Security 6:
+@Configuration
+public class OldSecurityConfig extends WebSecurityConfigurerAdapter {
+    @Override
+    protected void configure(HttpSecurity http) throws Exception { ... }
+}
+```
+
+In Spring Boot 3.x / Spring Security 6.x:
+- `WebSecurityConfigurerAdapter` has been **completely removed**.
+- We use a **component-based `@Bean` model**.
+- We declare a `@Bean` method returning `SecurityFilterChain`.
+- Method chaining configuration now uses **lambda DSL** (e.g., `csrf(AbstractHttpConfigurer::disable)`).
+
+> **Interview Q:** *"How did Spring Security configuration change in Spring Boot 3 / Spring Security 6?"*
+> "Spring Security moved away from extending `WebSecurityConfigurerAdapter` to a component-based configuration style. We now declare standalone `@Bean` methods, specifically returning a `SecurityFilterChain` configured via Lambda DSL, and expose beans like `PasswordEncoder` and `AuthenticationManager` directly in the Spring context."
+
+---
+
+### 3. Why Disable CSRF in a JWT REST API?
+
+**What is CSRF (Cross-Site Request Forgery)?**
+An attack where a malicious website tricks a user's browser into executing unwanted actions on a trusted site where the user is currently authenticated.
+
+**Why does CSRF happen with cookies?**
+Browsers automatically attach cookies (like `JSESSIONID`) to cross-origin requests.
+
+**Why is our JWT API immune to CSRF?**
+1. We store NO session cookies on the client.
+2. The JWT is sent explicitly in the `Authorization: Bearer <token>` HTTP header by our client (e.g. mobile app, frontend SPA).
+3. Browsers **never** attach custom HTTP headers automatically on cross-site requests.
+4. Therefore, CSRF attacks cannot succeed, and enabling CSRF protection would only add unnecessary overhead and require CSRF token handling.
+
+```java
+.csrf(AbstractHttpConfigurer::disable)
+```
+
+---
+
+### 4. Route Authorization: `authorizeHttpRequests`
+
+We configure our endpoint access rules:
+
+```java
+.authorizeHttpRequests(auth -> auth
+    .requestMatchers("/api/v1/auth/**", "/auth/**", "/error").permitAll()
+    .anyRequest().authenticated()
+)
+```
+
+- **`permitAll()` on `/api/v1/auth/**` & `/auth/**`**: Anyone can register (`/auth/register`) or login (`/auth/login`) without an existing JWT. `/error` is permitted so Spring Boot's internal error handler can render proper error responses.
+- **`anyRequest().authenticated()`**: Every other endpoint (e.g., `/habits/**`, `/habits/{id}/logs`) requires a valid JWT.
+
+> **Rule:** *Principle of Least Privilege* — explicitly whitelist public routes, lock down everything else by default.
+
+---
+
+### 5. Stateless Session Policy: `SessionCreationPolicy.STATELESS`
+
+```java
+.sessionManagement(session -> session
+    .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+)
+```
+
+- **`ALWAYS`**: Always create an `HttpSession`.
+- **`IF_REQUIRED`** (Default): Create an `HttpSession` only if needed.
+- **`NEVER`**: Never create an `HttpSession`, but use one if it already exists.
+- **`STATELESS`**: Spring Security will **never** create an `HttpSession` and will **never** store or use `SecurityContext` in a session.
+
+Every HTTP request is completely independent and must provide its own credentials (the JWT token).
+
+---
+
+### 6. Filter Ordering: Why `addFilterBefore`?
+
+```java
+.addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class)
+```
+
+Spring Security has a default chain of filters. One standard filter is `UsernamePasswordAuthenticationFilter` (used for traditional form login).
+
+By placing `JwtAuthenticationFilter` **before** it:
+1. When a request arrives, our filter runs first.
+2. It extracts the JWT, verifies it, loads the user, and sets `SecurityContextHolder.getContext().setAuthentication(authToken)`.
+3. When subsequent authorization checks run down the chain (like `FilterSecurityInterceptor` / `AuthorizationFilter`), they see the user is already authenticated!
+
+---
+
+### 7. The Core Beans Defined in `SecurityConfig`
+
+#### A. `PasswordEncoder` (`BCryptPasswordEncoder`)
+```java
+@Bean
+public PasswordEncoder passwordEncoder() {
+    return new BCryptPasswordEncoder();
+}
+```
+- Uses **BCrypt** hashing algorithm.
+- Has a built-in random salt generator (generates a unique salt for every password).
+- Hashing is one-way (irreversible) and deliberately CPU-intensive (work factor / 10 rounds) to resist brute-force attacks.
+- Used in `AuthService` when creating users and `DaoAuthenticationProvider` when verifying passwords.
+
+#### B. `AuthenticationProvider` (`DaoAuthenticationProvider`)
+```java
+@Bean
+public AuthenticationProvider authenticationProvider() {
+    DaoAuthenticationProvider authProvider = new DaoAuthenticationProvider();
+    authProvider.setUserDetailsService(userDetailsService);
+    authProvider.setPasswordEncoder(passwordEncoder());
+    return authProvider;
+}
+```
+- `DaoAuthenticationProvider` is Spring's standard provider that retrieves user details from a `UserDetailsService` and checks passwords with a `PasswordEncoder`.
+
+#### C. `AuthenticationManager`
+```java
+@Bean
+public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
+    return config.getAuthenticationManager();
+}
+```
+- The top-level interface for authenticating a request.
+- In `AuthService` (Step 11), we call `authenticationManager.authenticate(new UsernamePasswordAuthenticationToken(email, password))` to verify credentials during login.
+
+---
+
+### 8. Key Interview Questions & Answers
+
+> **Q1: Why is `BCrypt` preferred over `MD5` or `SHA-256` for password hashing?**
+> "MD5 and SHA-256 are general-purpose cryptographic hash functions designed to be extremely fast. Fast hashing makes them vulnerable to brute-force and rainbow table attacks. BCrypt is a slow, adaptive hashing algorithm with built-in salting. Its work factor (iteration count) can be increased as hardware gets faster, making brute-force attacks computationally infeasible."
+
+> **Q2: What is the role of `AuthenticationManager` in Spring Security?**
+> "`AuthenticationManager` is the main coordinator for authentication. When passed an `Authentication` object containing user credentials, it iterates through its registered `AuthenticationProvider`s (like `DaoAuthenticationProvider`) to validate the credentials and return a fully authenticated `Authentication` object."
+
+> **Q3: What happens if an unauthenticated user calls a protected endpoint?**
+> "The `JwtAuthenticationFilter` passes the request through without setting an authentication object in `SecurityContextHolder`. When the request reaches the `AuthorizationFilter` at the end of the filter chain, it checks `anyRequest().authenticated()`, sees no authentication in the context, and responds with HTTP 401 Unauthorized."
+
+---
+
+### ✅ Step 10 — Git Commit
+
+```bash
+git add .
+git commit -m "Step 10: Add SecurityConfig - SecurityFilterChain, stateless JWT policy, routes, and auth beans"
+```
+
+---
+
+## Phase 1 · Step 11 — Authentication Service (`AuthService.java`)
+
+---
+
+### 1. What is `AuthService` and Why Do We Need It?
+
+`AuthService` holds the **core business logic** for user onboarding and authentication.
+
+In clean layered architecture (`Controller → Service → Repository → Database`):
+- **Controllers** should be thin: only handle HTTP requests, path variables, request bodies, and HTTP status codes.
+- **Repositories** should be simple: perform database CRUD.
+- **Services** are where the business rules live: validation, password hashing, transaction boundaries, orchestration between multiple repositories/security managers, and token generation.
+
+---
+
+### 2. Deep Dive: The Registration Flow (`register`)
+
+```
+1. Receive RegisterRequest (name, email, password)
+      ↓
+2. Normalize email: request.email().toLowerCase().trim()
+      ↓
+3. Check DB: userRepository.existsByEmail(email)
+      → If TRUE: throw DuplicateResourceException (409 Conflict)
+      ↓
+4. Hash password: passwordEncoder.encode(password)  [BCrypt with salt]
+      ↓
+5. Build User entity (User.builder()...)
+   - streakFreezeTokens set to default (1) via @Builder.Default
+      ↓
+6. Persist User: userRepository.save(user)  → MySQL INSERT
+      ↓
+7. Load UserDetails: userDetailsService.loadUserByUsername(user.getEmail())
+      ↓
+8. Generate JWT: jwtUtil.generateToken(userDetails)
+      ↓
+9. Return AuthResponse (token, id, name, email, streakFreezeTokens)
+```
+
+---
+
+### 3. Deep Dive: The Login Flow (`login`)
+
+```
+1. Receive LoginRequest (email, password)
+      ↓
+2. Normalize email: request.email().toLowerCase().trim()
+      ↓
+3. Delegate to AuthenticationManager:
+   authenticationManager.authenticate(
+       new UsernamePasswordAuthenticationToken(email, password)
+   )
+      ↓
+   Did password match BCrypt hash in DB?
+      - ❌ NO  → throws BadCredentialsException (GlobalExceptionHandler returns 401 Unauthorized)
+      - ✅ YES → continues without exception
+      ↓
+4. Fetch User entity: userRepository.findByEmail(email)
+      - If missing: throw ResourceNotFoundException (404)
+      ↓
+5. Load UserDetails: userDetailsService.loadUserByUsername(email)
+      ↓
+6. Generate JWT: jwtUtil.generateToken(userDetails)
+      ↓
+7. Return AuthResponse (token, id, name, email, streakFreezeTokens)
+```
+
+---
+
+### 4. Why Delegate Login to `AuthenticationManager`?
+
+> **Interview Q:** *"Why use `AuthenticationManager.authenticate(...)` instead of manually doing `userRepository.findByEmail()` + `passwordEncoder.matches()` in your service?"*
+
+**Answer:**
+1. **Separation of Concerns:** Spring Security is designed to handle authentication. Doing manual `passwordEncoder.matches()` bypasses Spring Security's authentication lifecycle.
+2. **Security Events & Auditing:** `AuthenticationManager` fires authentication success/failure events (e.g. `AuthenticationSuccessEvent`, `AuthenticationFailureBadCredentialsEvent`) which security audit loggers, rate limiters, or account lockout mechanisms can listen to.
+3. **Pluggable Architecture:** If tomorrow we add multi-factor authentication (MFA), LDAP, or OAuth2, `AuthenticationManager` coordinates all providers without changing the service logic.
+
+---
+
+### 5. Why `@Transactional` and `@Transactional(readOnly = true)`?
+
+- **`@Transactional` on `register()`:**
+  - Wraps the method execution in a database transaction.
+  - If an exception occurs after saving the user (e.g. failure during post-registration steps), the database operation is automatically **rolled back**, preventing partial/corrupt data.
+
+- **`@Transactional(readOnly = true)` on `login()`:**
+  - Informs Hibernate/JPA that no entity modifications will take place during this call.
+  - **Performance Optimization:** Hibernate disables dirty checking (it doesn't need to snapshot entities or check if fields were modified), reducing CPU and memory overhead.
+
+---
+
+### 6. Email Normalization
+
+```java
+String normalizedEmail = request.email().toLowerCase().trim();
+```
+
+- Prevents duplicate registrations like `User@Example.com` and `user@example.com` creating separate accounts in databases with case-sensitive collation.
+- Strips accidental leading/trailing spaces from user input.
+
+---
+
+### 7. Key Interview Questions & Answers
+
+> **Q1: What happens if a user submits an incorrect password during login?**
+> "`AuthenticationManager.authenticate()` delegates to `DaoAuthenticationProvider`. It loads the user via `CustomUserDetailsService` and checks the raw password against the stored BCrypt hash using `PasswordEncoder.matches()`. If they don't match, it throws `BadCredentialsException`. Our `GlobalExceptionHandler` intercepts this and returns a clean HTTP 401 Unauthorized response with message 'Invalid email or password'."
+
+> **Q2: Why do we return an `AuthResponse` record instead of the `User` entity?**
+> "1. **Security:** Exposing JPA entities directly in API responses can accidentally leak sensitive fields like the BCrypt password hash or internal database audit fields.
+> 2. **Decoupling:** DTOs decouple the external API contract from the internal database schema.
+> 3. **Immutability:** Java 17 records are immutable data carriers, thread-safe and free from boilerplate."
+
+---
+
+### ✅ Step 11 — Git Commit
+
+```bash
+git add .
+git commit -m "Step 11: Add AuthService - user registration, BCrypt password hashing, login authentication, and JWT issuance"
+```
+
+---
+
+## Phase 1 · Step 12 — Authentication Controller (`AuthController.java`)
+
+---
+
+### 1. The Role of the Controller in Clean Layered Architecture
+
+`AuthController` is the **public REST API gateway** for our authentication system.
+
+In our 4-tier architecture (`Controller → Service → Repository → Database`):
+- The **Controller layer** should NEVER contain business logic or database queries.
+- Its only responsibilities are:
+  1. Map incoming HTTP requests (`POST /api/v1/auth/register`, `POST /api/v1/auth/login`) to Java methods.
+  2. Trigger request payload validation (`@Valid`).
+  3. Delegate the actual work to `AuthService`.
+  4. Wrap and return the result in a `ResponseEntity` with the correct HTTP status code (`201 Created` or `200 OK`).
+
+---
+
+### 2. Key Annotations Explained
+
+| Annotation | What It Does | Why We Use It |
+|---|---|---|
+| `@RestController` | Combines `@Controller` + `@ResponseBody` | Automatically serializes return values into JSON format using Jackson. |
+| `@RequestMapping("/auth")` | Sets base URL prefix for this controller | Combined with `server.servlet.context-path=/api/v1`, full URLs are `/api/v1/auth/*`. |
+| `@RequiredArgsConstructor` | Generates constructor for `final AuthService` | Idiomatic Spring constructor injection (no `@Autowired` field injection). |
+| `@PostMapping("/register")` | Maps HTTP POST `/api/v1/auth/register` | Used for submitting new user data. |
+| `@PostMapping("/login")` | Maps HTTP POST `/api/v1/auth/login` | Used for submitting login credentials. |
+| `@Valid` | Triggers Bean Validation (JSR-380) | Evaluates `@NotBlank`, `@Email`, `@Size` on the DTO. If invalid, throws `MethodArgumentNotValidException` before the method body runs. |
+| `@RequestBody` | Reads HTTP request body | Tells Jackson to deserialize incoming JSON string into Java record DTOs (`RegisterRequest` / `LoginRequest`). |
+
+---
+
+### 3. REST HTTP Status Code Standards
+
+> **Interview Q:** *"Why use HTTP 201 Created for registration and HTTP 200 OK for login?"*
+
+- **`201 CREATED` (`HttpStatus.CREATED`) on `/register`:**
+  - Standard REST specification RFC 7231: Whenever an HTTP request results in the creation of a new persistent resource on the server (a new User row in MySQL), the server MUST return `201 Created`.
+- **`200 OK` (`HttpStatus.OK`) on `/login`:**
+  - Login does NOT create a new entity in the database. It validates existing credentials and retrieves an authorization token. `200 OK` is the standard status code for successful retrieval/action.
+
+---
+
+### 4. The Complete End-to-End JWT Authentication Lifecycle
+
+```
+CLIENT (Postman / React / Mobile)
+  │
+  │  POST /api/v1/auth/register { "name": "Akshay", "email": "ak@test.com", "password": "pass" }
+  ▼
+[Tomcat Web Server]
+  │ (Context Path: /api/v1)
+  ▼
+[Spring Security Filter Chain]
+  │
+  ├─► JwtAuthenticationFilter: Header missing /auth/** → pass through
+  │
+  ├─► SecurityConfig: requestMatchers("/api/v1/auth/**").permitAll() → ALLOWED ✅
+  ▼
+[AuthController.register(@Valid @RequestBody RegisterRequest)]
+  │
+  ├─► Bean Validation passes (@NotBlank, @Email, @Size)
+  ▼
+[AuthService.register(request)]
+  │
+  ├─► userRepository.existsByEmail() → False
+  ├─► passwordEncoder.encode("pass") → "$2a$10$e8..."
+  ├─► userRepository.save(User) → MySQL INSERT INTO users...
+  ├─► userDetailsService.loadUserByUsername("ak@test.com")
+  ├─► jwtUtil.generateToken(userDetails) → "eyJhbGciOiJIUzI1NiIsIn..."
+  ▼
+[AuthController returns ResponseEntity(AuthResponse, HttpStatus.CREATED)]
+  │
+  ▼
+CLIENT receives HTTP 201 Created + JSON:
+{
+  "token": "eyJhbGciOiJIUzI1NiIsIn...",
+  "userId": 1,
+  "name": "Akshay",
+  "email": "ak@test.com",
+  "streakFreezeTokens": 1
+}
+```
+
+---
+
+### 5. Key Interview Questions & Answers
+
+> **Q1: Why is `@Valid` placed on the Controller method argument instead of validating in the Service?**
+> "Failing fast at the controller layer prevents unnecessary service invocations and database roundtrips for malformed requests. Spring MVC automatically routes validation failures to `@ExceptionHandler(MethodArgumentNotValidException.class)` in `GlobalExceptionHandler`, producing structured 400 Bad Request responses."
+
+> **Q2: What is the difference between `@Controller` and `@RestController`?**
+> "`@Controller` is for traditional Spring MVC returning server-rendered HTML views (JSP/Thymeleaf). To return JSON from a `@Controller`, you must add `@ResponseBody` on every method. `@RestController` is a convenience meta-annotation that includes `@Controller` and `@ResponseBody`, ensuring all method return values are automatically serialized into the HTTP response body as JSON."
+
+---
+
+### ✅ Step 12 — Git Commit
+
+```bash
+git add .
+git commit -m "Step 12: Add AuthController - register and login REST endpoints (Phase 1 JWT Auth complete)"
+```
+
+---
+
+## 🏆 Phase 1 Summary: JWT Authentication System Complete!
+
+| Step | Component | Purpose | Status |
+|---|---|---|---|
+| Step 7 | `JwtUtil.java` | Generate, parse, sign, and validate JWT tokens (JJWT 0.12.3) | ✅ |
+| Step 8 | `CustomUserDetailsService.java` | Bridge between MySQL `User` entity and Spring Security's `UserDetails` | ✅ |
+| Step 9 | `JwtAuthenticationFilter.java` | Intercept every incoming request to extract & validate JWT in `SecurityContextHolder` | ✅ |
+| Step 10 | `SecurityConfig.java` | Stateless session policy, CSRF disabled, public route permitAll, auth beans | ✅ |
+| Step 11 | `AuthService.java` | Registration validation, BCrypt hashing, `AuthenticationManager` login delegation | ✅ |
+| Step 12 | `AuthController.java` | REST endpoints for `/api/v1/auth/register` (201) and `/api/v1/auth/login` (200) | ✅ |
+
+---
+
+---
+
+> **Phase 2:** Habit Management & Tracking System
+
+---
+
+## Phase 2 · Step 13 — Habit Service (`HabitService.java`)
+
+---
+
+### 1. What is `HabitService` and Why Do We Need It?
+
+`HabitService` is the domain engine responsible for:
+1. **Habit Lifecycle (CRUD):** Creating, retrieving, updating, and deleting habits.
+2. **User Data Isolation & Security (IDOR Prevention):** Ensuring that a user can ONLY view, edit, or delete habits that belong to their own account.
+3. **Streak Calculation Engine:** Dynamically calculating the `currentStreak` and `longestStreak` from historical `HabitLog` records.
+
+---
+
+### 2. User Isolation & Preventing Insecure Direct Object References (IDOR)
+
+> **Interview Q:** *"Why don't we use `habitRepository.findById(habitId)` when fetching, updating, or deleting a habit?"*
+
+**Answer:**
+If we used `habitRepository.findById(habitId)`:
+- User A (ID: 1) could send a request `PUT /api/v1/habits/42` or `DELETE /api/v1/habits/42`.
+- If habit `42` belongs to User B (ID: 2), User A could modify or delete User B's private data! This critical security vulnerability is called **Insecure Direct Object Reference (IDOR)** (OWASP Top 10).
+
+**Our Solution:**
+We always extract the authenticated user's email from the JWT token and use:
+```java
+habitRepository.findByIdAndUserId(habitId, user.getId())
+```
+This generates SQL:
+```sql
+SELECT * FROM habits WHERE id = ? AND user_id = ?
+```
+If habit `42` does not belong to the calling user, the query returns `Optional.empty()`, resulting in a safe `ResourceNotFoundException (404)`.
+
+---
+
+### 3. Deep Dive: Dynamic Streak Calculation Algorithm
+
+```
+                  ┌─────────────────────────────────────┐
+                  │ Chronologically Sorted Habit Logs   │
+                  │   [Aug 17, Aug 18, Aug 19, Aug 20]  │
+                  └──────────────────┬──────────────────┘
+                                     │
+                     ┌───────────────┴───────────────┐
+                     ▼                               ▼
+       [1. Current Streak Engine]       [2. Longest Streak Engine]
+       - Check if today is logged.       - Iterate sorted unique dates.
+       - If not, check yesterday.        - If date == prevDate + 1:
+       - Walk backward consecutively:      runningStreak++
+         Aug 20 -> Aug 19 -> Aug 18      - Else: runningStreak = 1
+       - Current Streak = 3 days 🔥     - Longest Streak = Max(running) 🏆
+```
+
+#### Why Calculate Streaks Dynamically instead of Static DB Columns?
+1. **Single Source of Truth:** `HabitLog` rows represent reality. If streak counters were stored as raw integer columns on the `habits` table, race conditions, missed days, or manual log edits could cause the counter to get out of sync with actual logs.
+2. **Time-Sensitive State:** A streak expires automatically if yesterday passed without a log. With dynamic calculation, opening the app the next day immediately reflects the correct streak without needing nightly background cron jobs to decrement numbers.
+
+---
+
+### 4. Code Breakdown: Key Methods in `HabitService`
+
+| Method | Transaction | Purpose |
+|---|---|---|
+| `createHabit(request, email)` | `@Transactional` | Saves new `Habit` linked to authenticated `User`. |
+| `getAllUserHabits(email)` | `@Transactional(readOnly = true)` | Fetches all user habits & enriches with computed streaks. |
+| `getHabitById(id, email)` | `@Transactional(readOnly = true)` | Fetches single habit with IDOR verification + streaks. |
+| `updateHabit(id, request, email)` | `@Transactional` | Updates name/description for owned habit. |
+| `deleteHabit(id, email)` | `@Transactional` | Deletes habit; `CascadeType.ALL` removes all linked logs. |
+| `calculateStreaks(logs)` | Pure in-memory | $O(N)$ calculation for current and longest streak. |
+
+---
+
+### 5. Key Interview Questions & Answers
+
+> **Q1: Why do we use `@Transactional(readOnly = true)` on read methods like `getAllUserHabits`?**
+> "1. **Performance (Dirty Checking Disabled):** In standard transactions, Hibernate snapshots all entity states to detect if any field changed before commit. In `readOnly = true`, Hibernate disables snapshotting and dirty checking, saving significant CPU and memory.
+> 2. **Database Driver Optimization:** It allows underlying JDBC drivers and databases (like MySQL replicas) to route read queries to read-only replica instances."
+
+> **Q2: What happens to habit logs when a habit is deleted?**
+> "Because the `@OneToMany` relationship on `Habit.java` defines `cascade = CascadeType.ALL, orphanRemoval = true`, deleting the parent `Habit` automatically issues `DELETE FROM habit_logs WHERE habit_id = ?`, maintaining referential integrity without manual cleanup."
+
+---
+
+### ✅ Step 13 — Git Commit
+
+```bash
+git add .
+git commit -m "Step 13: Add HabitService - Habit CRUD, IDOR user isolation, and dynamic streak calculation algorithm"
+```
+
+---
+
+> **Next Step:** Step 14 — Habit Logging Engine & Streak Freeze Service (`HabitLogService.java`)
+
