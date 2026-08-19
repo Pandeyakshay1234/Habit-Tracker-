@@ -1406,27 +1406,37 @@ If habit `42` does not belong to the calling user, the query returns `Optional.e
 
 ---
 
-### 4. Code Breakdown: Key Methods in `HabitService`
+### 4. Code Breakdown: How Each Method Works (4 Simple Steps)
 
-| Method | Transaction | Purpose |
+Every CRUD method follows the exact same 4-step pattern:
+
+```
+Step 1: Find the User by email (from JWT token)
+Step 2: Find / Create the Habit (using findByIdAndUserId for security)
+Step 3: Perform Action (save / update / delete / calculate streaks)
+Step 4: Return DTO (HabitResponse)
+```
+
+| Method | Transaction | What It Does (In Simple Words) |
 |---|---|---|
-| `createHabit(request, email)` | `@Transactional` | Saves new `Habit` linked to authenticated `User`. |
-| `getAllUserHabits(email)` | `@Transactional(readOnly = true)` | Fetches all user habits & enriches with computed streaks. |
-| `getHabitById(id, email)` | `@Transactional(readOnly = true)` | Fetches single habit with IDOR verification + streaks. |
-| `updateHabit(id, request, email)` | `@Transactional` | Updates name/description for owned habit. |
-| `deleteHabit(id, email)` | `@Transactional` | Deletes habit; `CascadeType.ALL` removes all linked logs. |
-| `calculateStreaks(logs)` | Pure in-memory | $O(N)$ calculation for current and longest streak. |
+| `createHabit` | `@Transactional` | Finds user $\rightarrow$ builds habit $\rightarrow$ saves to DB $\rightarrow$ returns with `streak = 0`. |
+| `getAllUserHabits` | `@Transactional(readOnly = true)` | Finds user $\rightarrow$ gets habits $\rightarrow$ loops through habits to calculate streaks $\rightarrow$ returns list. |
+| `getHabitById` | `@Transactional(readOnly = true)` | Finds habit by ID + User ID $\rightarrow$ calculates streaks $\rightarrow$ returns response. |
+| `updateHabit` | `@Transactional` | Finds habit $\rightarrow$ updates `name` & `description` $\rightarrow$ saves $\rightarrow$ returns updated response. |
+| `deleteHabit` | `@Transactional` | Finds habit $\rightarrow$ deletes from DB (cascade removes all its logs automatically). |
+| `calculateCurrentStreak` | Helper | Uses `HashSet` of logged dates $\rightarrow$ counts backwards consecutively from today/yesterday. |
+| `calculateLongestStreak` | Helper | Loops through sorted logs $\rightarrow$ tracks maximum consecutive days chain seen. |
 
 ---
 
-### 5. Key Interview Questions & Answers
+### 5. How to Explain This in an Interview (Fresher Cheatsheet)
 
-> **Q1: Why do we use `@Transactional(readOnly = true)` on read methods like `getAllUserHabits`?**
-> "1. **Performance (Dirty Checking Disabled):** In standard transactions, Hibernate snapshots all entity states to detect if any field changed before commit. In `readOnly = true`, Hibernate disables snapshotting and dirty checking, saving significant CPU and memory.
-> 2. **Database Driver Optimization:** It allows underlying JDBC drivers and databases (like MySQL replicas) to route read queries to read-only replica instances."
+> **"How do you handle Habit CRUD and ensure data security?"**
+> *"In `HabitService`, every method receives the logged-in user's email from the JWT token. To prevent IDOR attacks where one user could tamper with another's data, we always query using `findByIdAndUserId(habitId, userId)` instead of just `findById`. If the habit doesn't belong to the caller, it safely throws a 404 `ResourceNotFoundException`."*
 
-> **Q2: What happens to habit logs when a habit is deleted?**
-> "Because the `@OneToMany` relationship on `Habit.java` defines `cascade = CascadeType.ALL, orphanRemoval = true`, deleting the parent `Habit` automatically issues `DELETE FROM habit_logs WHERE habit_id = ?`, maintaining referential integrity without manual cleanup."
+> **"How does your streak algorithm work?"**
+> *"1. **Current Streak:** I put all logged dates into a `HashSet`. I check if today or yesterday is logged, then use a `while` loop walking backwards day by day (`minusDays(1)`). As long as each previous day exists in the set, I increment the streak counter.
+> 2. **Longest Streak:** I iterate through the chronologically sorted logs. If `currentDate` is `previousDate + 1`, I increase the streak. If there's a gap, I reset the streak counter to 1. I keep track of the maximum streak achieved."*
 
 ---
 
@@ -1434,7 +1444,7 @@ If habit `42` does not belong to the calling user, the query returns `Optional.e
 
 ```bash
 git add .
-git commit -m "Step 13: Add HabitService - Habit CRUD, IDOR user isolation, and dynamic streak calculation algorithm"
+git commit -m "Step 13: Add HabitService - Clean, simplified Habit CRUD with dynamic streak calculation"
 ```
 
 ---

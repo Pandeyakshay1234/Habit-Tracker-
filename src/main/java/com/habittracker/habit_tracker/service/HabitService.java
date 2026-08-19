@@ -14,270 +14,232 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
-import java.util.Collections;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
- * HabitService — Business Logic for Habit CRUD and Streak Aggregation
+ * HabitService — Business Logic for Habit Operations (CRUD & Streak Calculation)
  *
- * Responsibilities:
- *   1. Create Habit: Associates the new habit with the authenticated user.
- *   2. Get All Habits: Retrieves all habits owned by the authenticated user with computed streaks.
- *   3. Get Habit By ID: Enforces user isolation (User A cannot view User B's habits).
- *   4. Update Habit: Modifies habit name and description with ownership verification.
- *   5. Delete Habit: Removes habit and cascades deletion of all associated logs.
- *   6. Dynamic Streak Calculation: Computes current and longest streaks from historical logs.
+ * Easy to explain in interviews:
+ * 1. Each user can only see and modify their OWN habits (security check using findByIdAndUserId).
+ * 2. Habits start with 0 streak when created.
+ * 3. Streaks are calculated dynamically from the habit_logs table.
  */
-@Service                                        // Marks this class as a Spring Service Bean in the application context
-@RequiredArgsConstructor                        // Lombok generates constructor for all final fields for dependency injection
+@Service                                        // Tells Spring to manage this class as a Service Bean
+@RequiredArgsConstructor                        // Lombok generates constructor for all final repositories
 public class HabitService {
 
     // ─────────────────────────────────────────────────────────────
-    // DEPENDENCIES
+    // DEPENDENCIES (Injected via constructor by Spring)
     // ─────────────────────────────────────────────────────────────
-
-    // Repository for CRUD database operations on habits table
     private final HabitRepository habitRepository;
-
-    // Repository to query habit completion logs for streak calculation
     private final HabitLogRepository habitLogRepository;
-
-    // Repository to look up the authenticated User entity from MySQL
     private final UserRepository userRepository;
 
     // ─────────────────────────────────────────────────────────────
     // 1. CREATE HABIT
     // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Creates a new habit for the currently authenticated user.
-     *
-     * @param request   DTO containing habit name and description
-     * @param userEmail Email of the authenticated user extracted from JWT
-     * @return HabitResponse containing created habit details and initial 0 streak
-     */
-    @Transactional                              // Wraps database write operations in a transaction
+    @Transactional                              // Saves data safely in a database transaction
     public HabitResponse createHabit(HabitRequest request, String userEmail) {
-        // Fetch authenticated user from database or throw 404 if not found
-        User user = getAuthenticatedUser(userEmail);
+        // Step 1: Find the logged-in user from DB using their email (from JWT token)
+        User user = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found with email: " + userEmail));
 
-        // Build new Habit entity and associate it with the authenticated user
+        // Step 2: Create a new Habit entity and link it to the user
         Habit habit = Habit.builder()
-                .name(request.name().trim())    // Trim whitespace to ensure clean data
-                .description(request.description() != null ? request.description().trim() : null)
-                .user(user)                     // Set Foreign Key reference to the user
+                .name(request.name().trim())
+                .description(request.description())
+                .user(user)                     // Sets the foreign key (user_id)
                 .build();
 
-        // Save habit to MySQL database
+        // Step 3: Save to MySQL database
         Habit savedHabit = habitRepository.save(habit);
 
-        // Newly created habits start with current streak = 0 and longest streak = 0
-        return mapToHabitResponse(savedHabit, 0, 0);
+        // Step 4: Return response (new habit starts with 0 current and 0 longest streak)
+        return mapToResponse(savedHabit, 0, 0);
     }
 
     // ─────────────────────────────────────────────────────────────
-    // 2. GET ALL USER HABITS
+    // 2. GET ALL HABITS OF LOGGED-IN USER
     // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Retrieves all habits belonging to the authenticated user with calculated streaks.
-     *
-     * @param userEmail Email of the authenticated user
-     * @return List of HabitResponse DTOs
-     */
-    @Transactional(readOnly = true)             // Optimizes read performance by disabling Hibernate dirty checking
+    @Transactional(readOnly = true)             // Read-only transaction (faster, no dirty checking)
     public List<HabitResponse> getAllUserHabits(String userEmail) {
-        // Fetch authenticated user from database
-        User user = getAuthenticatedUser(userEmail);
+        // Step 1: Find the logged-in user
+        User user = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found with email: " + userEmail));
 
-        // Fetch all habits belonging to this specific user ID
+        // Step 2: Fetch all habits belonging to this user ID
         List<Habit> habits = habitRepository.findByUserId(user.getId());
 
-        // Transform each Habit entity to HabitResponse DTO including calculated streak metrics
-        return habits.stream()
-                .map(this::enrichHabitWithStreaks)
-                .collect(Collectors.toList());
+        // Step 3: Loop through each habit, calculate streaks, and build the response list
+        List<HabitResponse> responseList = new ArrayList<>();
+        for (Habit habit : habits) {
+            int currentStreak = calculateCurrentStreak(habit.getId());
+            int longestStreak = calculateLongestStreak(habit.getId());
+            responseList.add(mapToResponse(habit, currentStreak, longestStreak));
+        }
+
+        // Step 4: Return the list of habit responses
+        return responseList;
     }
 
     // ─────────────────────────────────────────────────────────────
-    // 3. GET HABIT BY ID
+    // 3. GET SINGLE HABIT BY ID
     // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Retrieves a single habit by ID, enforcing that it belongs to the authenticated user.
-     *
-     * @param habitId   ID of the habit to fetch
-     * @param userEmail Email of the authenticated user
-     * @return HabitResponse DTO with calculated streaks
-     */
-    @Transactional(readOnly = true)             // Read-only transaction optimization
+    @Transactional(readOnly = true)
     public HabitResponse getHabitById(Long habitId, String userEmail) {
-        // Fetch authenticated user
-        User user = getAuthenticatedUser(userEmail);
+        // Step 1: Find the logged-in user
+        User user = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found with email: " + userEmail));
 
-        // Find habit ensuring it belongs to this user (IDOR prevention)
+        // Step 2: Find habit by ID AND ensure it belongs to this user (prevents IDOR attacks)
         Habit habit = habitRepository.findByIdAndUserId(habitId, user.getId())
                 .orElseThrow(() -> new ResourceNotFoundException("Habit not found with id: " + habitId));
 
-        // Return mapped DTO with calculated streaks
-        return enrichHabitWithStreaks(habit);
+        // Step 3: Calculate streaks
+        int currentStreak = calculateCurrentStreak(habit.getId());
+        int longestStreak = calculateLongestStreak(habit.getId());
+
+        // Step 4: Return response
+        return mapToResponse(habit, currentStreak, longestStreak);
     }
 
     // ─────────────────────────────────────────────────────────────
     // 4. UPDATE HABIT
     // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Updates an existing habit's name and description.
-     *
-     * @param habitId   ID of the habit to update
-     * @param request   DTO containing updated fields
-     * @param userEmail Email of the authenticated user
-     * @return HabitResponse DTO with updated details
-     */
-    @Transactional                              // Transactional write
+    @Transactional
     public HabitResponse updateHabit(Long habitId, HabitRequest request, String userEmail) {
-        // Fetch authenticated user
-        User user = getAuthenticatedUser(userEmail);
+        // Step 1: Find the logged-in user
+        User user = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found with email: " + userEmail));
 
-        // Find existing habit belonging to this user
+        // Step 2: Find existing habit belonging to this user
         Habit habit = habitRepository.findByIdAndUserId(habitId, user.getId())
                 .orElseThrow(() -> new ResourceNotFoundException("Habit not found with id: " + habitId));
 
-        // Update entity state
+        // Step 3: Update the fields
         habit.setName(request.name().trim());
-        habit.setDescription(request.description() != null ? request.description().trim() : null);
+        habit.setDescription(request.description());
 
-        // Save updated habit to database
+        // Step 4: Save updated habit to DB
         Habit updatedHabit = habitRepository.save(habit);
 
-        // Return enriched response with streak metrics preserved
-        return enrichHabitWithStreaks(updatedHabit);
+        // Step 5: Return updated response with calculated streaks
+        int currentStreak = calculateCurrentStreak(updatedHabit.getId());
+        int longestStreak = calculateLongestStreak(updatedHabit.getId());
+        return mapToResponse(updatedHabit, currentStreak, longestStreak);
     }
 
     // ─────────────────────────────────────────────────────────────
     // 5. DELETE HABIT
     // ─────────────────────────────────────────────────────────────
-
-    /**
-     * Deletes a habit and cascades deletion of all associated logs.
-     *
-     * @param habitId   ID of the habit to delete
-     * @param userEmail Email of the authenticated user
-     */
-    @Transactional                              // Transactional write
+    @Transactional
     public void deleteHabit(Long habitId, String userEmail) {
-        // Fetch authenticated user
-        User user = getAuthenticatedUser(userEmail);
+        // Step 1: Find the logged-in user
+        User user = userRepository.findByEmail(userEmail)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found with email: " + userEmail));
 
-        // Find habit belonging to this user or throw 404
+        // Step 2: Find habit belonging to this user
         Habit habit = habitRepository.findByIdAndUserId(habitId, user.getId())
                 .orElseThrow(() -> new ResourceNotFoundException("Habit not found with id: " + habitId));
 
-        // Delete from database (CascadeType.ALL removes child logs)
+        // Step 3: Delete habit (CascadeType.ALL in entity deletes all associated logs automatically)
         habitRepository.delete(habit);
     }
 
     // ─────────────────────────────────────────────────────────────
-    // 6. HELPER METHODS & STREAK CALCULATION ALGORITHM
+    // 6. HELPER: CALCULATE CURRENT STREAK
     // ─────────────────────────────────────────────────────────────
-
     /**
-     * Helper to look up the authenticated User entity by email.
-     *
-     * @param email User email from authentication context
-     * @return User entity
+     * How Current Streak works:
+     * - We check consecutive days backward from today.
+     * - If today is not logged yet, we start from yesterday (streak is still alive today).
+     * - If yesterday was also missed, streak is 0.
      */
-    private User getAuthenticatedUser(String email) {
-        return userRepository.findByEmail(email)
-                .orElseThrow(() -> new ResourceNotFoundException("User not found with email: " + email));
-    }
-
-    /**
-     * Helper to compute streak statistics and map Habit entity to HabitResponse DTO.
-     *
-     * @param habit Habit entity
-     * @return Enriched HabitResponse DTO
-     */
-    private HabitResponse enrichHabitWithStreaks(Habit habit) {
-        // Query all logs for this habit sorted chronologically
-        List<HabitLog> logs = habitLogRepository.findByHabitIdOrderByLogDateAsc(habit.getId());
-
-        // Calculate current streak and longest historical streak
-        StreakStats stats = calculateStreaks(logs);
-
-        // Map and return response
-        return mapToHabitResponse(habit, stats.currentStreak(), stats.longestStreak());
-    }
-
-    /**
-     * Streak Calculation Algorithm:
-     * Computes current streak and longest streak from chronological habit logs.
-     *
-     * Rules:
-     *   - Current streak is unbroken count of consecutive days up to today (or yesterday if today is not yet logged).
-     *   - Longest streak is the maximum consecutive sequence of logged dates across the habit's entire history.
-     *
-     * @param logs Chronologically sorted list of HabitLog entries
-     * @return StreakStats record containing (currentStreak, longestStreak)
-     */
-    public StreakStats calculateStreaks(List<HabitLog> logs) {
-        // If no logs exist, streaks are 0
-        if (logs == null || logs.isEmpty()) {
-            return new StreakStats(0, 0);
+    public int calculateCurrentStreak(Long habitId) {
+        // Fetch all logs of this habit
+        List<HabitLog> logs = habitLogRepository.findByHabitIdOrderByLogDateAsc(habitId);
+        if (logs.isEmpty()) {
+            return 0;
         }
 
-        // Collect all distinct logged dates into a Set for O(1) membership lookup
-        Set<LocalDate> loggedDates = logs.stream()
-                .map(HabitLog::getLogDate)
-                .collect(Collectors.toSet());
+        // Put all logged dates into a HashSet for fast O(1) lookup
+        Set<LocalDate> loggedDates = new HashSet<>();
+        for (HabitLog log : logs) {
+            loggedDates.add(log.getLogDate());
+        }
 
-        // ── 1. CALCULATE CURRENT STREAK ──────────────────────────────
         LocalDate today = LocalDate.now();
-        int currentStreak = 0;
+        int streak = 0;
 
-        // Check if today was completed; if not, check if yesterday was completed to keep streak alive
+        // If today is logged, start counting backward from today.
+        // If today is NOT logged yet, start from yesterday.
         LocalDate checkDate = loggedDates.contains(today) ? today : today.minusDays(1);
 
-        // Count consecutive days backward from checkDate
+        // Count consecutive days going backwards
         while (loggedDates.contains(checkDate)) {
-            currentStreak++;
-            checkDate = checkDate.minusDays(1);
+            streak++;
+            checkDate = checkDate.minusDays(1); // Move to previous day
         }
 
-        // ── 2. CALCULATE LONGEST STREAK ──────────────────────────────
-        // Extract sorted unique dates list
-        List<LocalDate> sortedDates = loggedDates.stream()
-                .sorted()
-                .toList();
-
-        int longestStreak = 0;
-        int runningStreak = 0;
-        LocalDate previousDate = null;
-
-        for (LocalDate date : sortedDates) {
-            if (previousDate == null || date.equals(previousDate.plusDays(1))) {
-                // First entry OR consecutive day: increment running streak
-                runningStreak++;
-            } else {
-                // Gap in dates: reset running streak to 1 for the new chain
-                runningStreak = 1;
-            }
-            // Update longest streak achieved
-            longestStreak = Math.max(longestStreak, runningStreak);
-            previousDate = date;
-        }
-
-        return new StreakStats(currentStreak, longestStreak);
+        return streak;
     }
 
+    // ─────────────────────────────────────────────────────────────
+    // 7. HELPER: CALCULATE LONGEST STREAK
+    // ─────────────────────────────────────────────────────────────
     /**
-     * Maps Habit entity + computed streak integers to HabitResponse record.
+     * How Longest Streak works:
+     * - Walk through all logs sorted from oldest to newest.
+     * - If next date is exactly (previousDate + 1 day), increase current count.
+     * - If there is a gap, reset current count to 1.
+     * - Track the maximum count achieved.
      */
-    private HabitResponse mapToHabitResponse(Habit habit, int currentStreak, int longestStreak) {
+    public int calculateLongestStreak(Long habitId) {
+        // Fetch all logs sorted by date ascending (oldest to newest)
+        List<HabitLog> logs = habitLogRepository.findByHabitIdOrderByLogDateAsc(habitId);
+        if (logs.isEmpty()) {
+            return 0;
+        }
+
+        int maxStreak = 0;
+        int currentCount = 0;
+        LocalDate previousDate = null;
+
+        for (HabitLog log : logs) {
+            LocalDate currentDate = log.getLogDate();
+
+            if (previousDate == null) {
+                // First log entry
+                currentCount = 1;
+            } else if (currentDate.equals(previousDate.plusDays(1))) {
+                // Consecutive day (e.g. Aug 19 -> Aug 20) -> increase streak
+                currentCount++;
+            } else if (currentDate.equals(previousDate)) {
+                // Same day log (safety check) -> ignore
+                continue;
+            } else {
+                // Gap between dates -> reset count to 1 for the new streak
+                currentCount = 1;
+            }
+
+            // Keep track of the highest streak seen
+            if (currentCount > maxStreak) {
+                maxStreak = currentCount;
+            }
+
+            previousDate = currentDate;
+        }
+
+        return maxStreak;
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // 8. HELPER: CONVERT ENTITY TO RESPONSE DTO
+    // ─────────────────────────────────────────────────────────────
+    private HabitResponse mapToResponse(Habit habit, int currentStreak, int longestStreak) {
         return new HabitResponse(
                 habit.getId(),
                 habit.getName(),
@@ -287,9 +249,4 @@ public class HabitService {
                 habit.getCreatedAt()
         );
     }
-
-    /**
-     * Immutable internal record holding computed streak metrics.
-     */
-    public record StreakStats(int currentStreak, int longestStreak) {}
 }
