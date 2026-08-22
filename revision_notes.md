@@ -1117,7 +1117,7 @@ In clean layered architecture (`Controller → Service → Repository → Databa
 ### 2. Deep Dive: The Registration Flow (`register`)
 
 ```
-1. Receive RegisterRequest (name, email, password)
+1. Receive RegisterRequestDto (name, email, password)
       ↓
 2. Normalize email: request.email().toLowerCase().trim()
       ↓
@@ -1135,7 +1135,7 @@ In clean layered architecture (`Controller → Service → Repository → Databa
       ↓
 8. Generate JWT: jwtUtil.generateToken(userDetails)
       ↓
-9. Return AuthResponse (token, id, name, email, streakFreezeTokens)
+9. Return AuthResponseDto (token, id, name, email, streakFreezeTokens)
 ```
 
 ---
@@ -1143,7 +1143,7 @@ In clean layered architecture (`Controller → Service → Repository → Databa
 ### 3. Deep Dive: The Login Flow (`login`)
 
 ```
-1. Receive LoginRequest (email, password)
+1. Receive LoginRequestDto (email, password)
       ↓
 2. Normalize email: request.email().toLowerCase().trim()
       ↓
@@ -1163,7 +1163,7 @@ In clean layered architecture (`Controller → Service → Repository → Databa
       ↓
 6. Generate JWT: jwtUtil.generateToken(userDetails)
       ↓
-7. Return AuthResponse (token, id, name, email, streakFreezeTokens)
+7. Return AuthResponseDto (token, id, name, email, streakFreezeTokens)
 ```
 
 ---
@@ -1207,7 +1207,7 @@ String normalizedEmail = request.email().toLowerCase().trim();
 > **Q1: What happens if a user submits an incorrect password during login?**
 > "`AuthenticationManager.authenticate()` delegates to `DaoAuthenticationProvider`. It loads the user via `CustomUserDetailsService` and checks the raw password against the stored BCrypt hash using `PasswordEncoder.matches()`. If they don't match, it throws `BadCredentialsException`. Our `GlobalExceptionHandler` intercepts this and returns a clean HTTP 401 Unauthorized response with message 'Invalid email or password'."
 
-> **Q2: Why do we return an `AuthResponse` record instead of the `User` entity?**
+> **Q2: Why do we return an `AuthResponseDto` record instead of the `User` entity?**
 > "1. **Security:** Exposing JPA entities directly in API responses can accidentally leak sensitive fields like the BCrypt password hash or internal database audit fields.
 > 2. **Decoupling:** DTOs decouple the external API contract from the internal database schema.
 > 3. **Immutability:** Java 17 records are immutable data carriers, thread-safe and free from boilerplate."
@@ -1251,7 +1251,7 @@ In our 4-tier architecture (`Controller → Service → Repository → Database`
 | `@PostMapping("/register")` | Maps HTTP POST `/api/v1/auth/register` | Used for submitting new user data. |
 | `@PostMapping("/login")` | Maps HTTP POST `/api/v1/auth/login` | Used for submitting login credentials. |
 | `@Valid` | Triggers Bean Validation (JSR-380) | Evaluates `@NotBlank`, `@Email`, `@Size` on the DTO. If invalid, throws `MethodArgumentNotValidException` before the method body runs. |
-| `@RequestBody` | Reads HTTP request body | Tells Jackson to deserialize incoming JSON string into Java record DTOs (`RegisterRequest` / `LoginRequest`). |
+| `@RequestBody` | Reads HTTP request body | Tells Jackson to deserialize incoming JSON string into Java record DTOs (`RegisterRequestDto` / `LoginRequestDto`). |
 
 ---
 
@@ -1282,7 +1282,7 @@ CLIENT (Postman / React / Mobile)
   │
   ├─► SecurityConfig: requestMatchers("/api/v1/auth/**").permitAll() → ALLOWED ✅
   ▼
-[AuthController.register(@Valid @RequestBody RegisterRequest)]
+[AuthController.register(@Valid @RequestBody RegisterRequestDto)]
   │
   ├─► Bean Validation passes (@NotBlank, @Email, @Size)
   ▼
@@ -1294,7 +1294,7 @@ CLIENT (Postman / React / Mobile)
   ├─► userDetailsService.loadUserByUsername("ak@test.com")
   ├─► jwtUtil.generateToken(userDetails) → "eyJhbGciOiJIUzI1NiIsIn..."
   ▼
-[AuthController returns ResponseEntity(AuthResponse, HttpStatus.CREATED)]
+[AuthController returns ResponseEntity(AuthResponseDto, HttpStatus.CREATED)]
   │
   ▼
 CLIENT receives HTTP 201 Created + JSON:
