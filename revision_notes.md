@@ -1117,7 +1117,7 @@ In clean layered architecture (`Controller → Service → Repository → Databa
 ### 2. Deep Dive: The Registration Flow (`register`)
 
 ```
-1. Receive RegisterRequestDto (name, email, password)
+1. Receive RegisterRequest (name, email, password)
       ↓
 2. Normalize email: request.email().toLowerCase().trim()
       ↓
@@ -1135,7 +1135,7 @@ In clean layered architecture (`Controller → Service → Repository → Databa
       ↓
 8. Generate JWT: jwtUtil.generateToken(userDetails)
       ↓
-9. Return AuthResponseDto (token, id, name, email, streakFreezeTokens)
+9. Return AuthResponse (token, id, name, email, streakFreezeTokens)
 ```
 
 ---
@@ -1143,7 +1143,7 @@ In clean layered architecture (`Controller → Service → Repository → Databa
 ### 3. Deep Dive: The Login Flow (`login`)
 
 ```
-1. Receive LoginRequestDto (email, password)
+1. Receive LoginRequest (email, password)
       ↓
 2. Normalize email: request.email().toLowerCase().trim()
       ↓
@@ -1207,7 +1207,7 @@ String normalizedEmail = request.email().toLowerCase().trim();
 > **Q1: What happens if a user submits an incorrect password during login?**
 > "`AuthenticationManager.authenticate()` delegates to `DaoAuthenticationProvider`. It loads the user via `CustomUserDetailsService` and checks the raw password against the stored BCrypt hash using `PasswordEncoder.matches()`. If they don't match, it throws `BadCredentialsException`. Our `GlobalExceptionHandler` intercepts this and returns a clean HTTP 401 Unauthorized response with message 'Invalid email or password'."
 
-> **Q2: Why do we return an `AuthResponseDto` record instead of the `User` entity?**
+> **Q2: Why do we return an `AuthResponse` record instead of the `User` entity?**
 > "1. **Security:** Exposing JPA entities directly in API responses can accidentally leak sensitive fields like the BCrypt password hash or internal database audit fields.
 > 2. **Decoupling:** DTOs decouple the external API contract from the internal database schema.
 > 3. **Immutability:** Java 17 records are immutable data carriers, thread-safe and free from boilerplate."
@@ -1440,6 +1440,8 @@ Step 4: Return DTO (HabitResponse)
 
 ---
 
+---
+
 ### ✅ Step 13 — Git Commit
 
 ```bash
@@ -1449,5 +1451,84 @@ git commit -m "Step 13: Add HabitService - Clean, simplified Habit CRUD with dyn
 
 ---
 
-> **Next Step:** Step 14 — Habit Logging Engine & Streak Freeze Service (`HabitLogService.java`)
+## Phase 2 · Step 14 — Habit Controller (`HabitController.java`)
+
+---
+
+### 1. What is `HabitController`?
+
+`HabitController` is the **REST API gateway** for all habit management operations. It connects incoming HTTP client requests with the business logic in `HabitService`.
+
+```
+Client (Postman / React)
+       │ (HTTP Request + Bearer JWT)
+       ▼
+JwtAuthenticationFilter (Validates Token & populates SecurityContext)
+       │
+       ▼
+HabitController (/api/v1/habits)
+       │ (Extracts User email from Authentication & calls service)
+       ▼
+HabitService (CRUD & Streak Business Logic)
+```
+
+---
+
+### 2. Key Design Decisions & Best Practices
+
+#### 1. Why extract user identity from `Authentication` instead of request parameters?
+- **The IDOR Security Risk:** If we accepted `userId` as a query parameter (`GET /habits?userId=5`) or in the JSON body, an attacker could change the ID and inspect or delete another user's habits.
+- **The Secure Solution:** We declare `Authentication authentication` in the controller method signature. Spring Security automatically resolves the authenticated principal from the thread-local `SecurityContextHolder`. We call `authentication.getName()`, which reliably yields the verified email from the validated JWT token.
+
+#### 2. RESTful HTTP Status Codes
+| Endpoint | Method | Status Code | Why? |
+|---|---|---|---|
+| `/habits` | `POST` | `201 CREATED` | Standard REST response when a new resource is successfully created. Returns the created `HabitResponseDto`. |
+| `/habits` | `GET` | `200 OK` | Standard response for retrieving a list of resources. |
+| `/habits/{id}` | `GET` | `200 OK` | Standard response for retrieving a single resource. |
+| `/habits/{id}` | `PUT` | `200 OK` | Standard response when an existing resource is updated and the updated payload is returned. |
+| `/habits/{id}` | `DELETE` | `204 NO CONTENT` | Standard REST response when a resource is successfully deleted and no response body is returned (`ResponseEntity.noContent().build()`). |
+
+#### 3. Automatic Validation with `@Valid`
+- `@Valid` on `@RequestBody HabitRequestDto` triggers Jakarta Bean Validation annotations (`@NotBlank`, `@Size`) before entering the method body.
+- If validation fails (e.g. empty habit name), Spring automatically throws `MethodArgumentNotValidException`, which our `GlobalExceptionHandler` intercepts to return a clean `400 Bad Request`.
+
+---
+
+### 3. All Endpoints Exposed in Step 14
+
+| HTTP Verb | Route | Access | Request Body | Response Body | Status Code |
+|---|---|---|---|---|---|
+| `POST` | `/api/v1/habits` | Protected | `HabitRequestDto` | `HabitResponseDto` | `201 CREATED` |
+| `GET` | `/api/v1/habits` | Protected | None | `List<HabitResponseDto>` | `200 OK` |
+| `GET` | `/api/v1/habits/{id}` | Protected | None | `HabitResponseDto` | `200 OK` |
+| `PUT` | `/api/v1/habits/{id}` | Protected | `HabitRequestDto` | `HabitResponseDto` | `200 OK` |
+| `DELETE` | `/api/v1/habits/{id}` | Protected | None | None | `204 NO CONTENT` |
+
+---
+
+### 4. How to Explain This in an Interview (Fresher Cheatsheet)
+
+> **Q1: How do you get the currently logged-in user in a Spring Boot Controller?**
+> *"In Spring MVC, you can declare an `Authentication authentication` or `Principal principal` parameter directly in your controller method. Spring's `HandlerMethodArgumentResolver` automatically resolves this from the current `SecurityContextHolder`. Calling `authentication.getName()` gives the verified username (or email) from the validated JWT token."*
+
+> **Q2: Why use `204 No Content` for DELETE endpoints?**
+> *"HTTP `204 No Content` signifies that the server successfully fulfilled the request, and there is no additional content to send in the response payload. It saves bandwidth and strictly follows RESTful API design principles."*
+
+> **Q3: What is the difference between `@PathVariable` and `@RequestParam`?**
+> *"1. `@PathVariable` extracts values directly embedded in the URI path hierarchy (e.g. `/api/v1/habits/{id}` $\rightarrow$ `/api/v1/habits/10`). Used for identifying specific resources.
+> 2. `@RequestParam` extracts query parameters from the URL query string (e.g. `/api/v1/habits?category=fitness`). Used for filtering, searching, or pagination."*
+
+---
+
+### ✅ Step 14 — Git Commit
+
+```bash
+git add .
+git commit -m "Step 14: Add HabitController - REST API endpoints for habit CRUD with Spring Security Authentication injection"
+```
+
+---
+
+> **Next Step:** Step 15 — Habit Logging Engine & Streak Freeze Service (`HabitLogService.java`)
 
