@@ -1521,6 +1521,8 @@ HabitService (CRUD & Streak Business Logic)
 
 ---
 
+---
+
 ### ✅ Step 14 — Git Commit
 
 ```bash
@@ -1530,5 +1532,94 @@ git commit -m "Step 14: Add HabitController - REST API endpoints for habit CRUD 
 
 ---
 
-> **Next Step:** Step 15 — Habit Logging Engine & Streak Freeze Service (`HabitLogService.java`)
+## Phase 2 · Step 15 — Habit Logging Engine & Streak Freeze Service (`HabitLogService.java`)
+
+---
+
+### 1. What is `HabitLogService`?
+
+`HabitLogService` is the **core gamification engine** of our application. It handles:
+1. **Daily Check-ins:** Marking a habit as completed for today.
+2. **Backdated Check-ins:** Logging habit completion for a past date if the user completed the work but forgot to log.
+3. **Streak Freeze Redemption:** Consuming a freeze token to bridge an uncompleted day so the user's streak remains uninterrupted.
+4. **Token Refunds on Undo:** Automatically restoring a freeze token if a user deletes a log that used a freeze.
+
+```
+Client (User Check-in)
+       │
+       ▼
+HabitLogService.logHabitCompletion() / useStreakFreeze()
+       ├─▶ Step 1: Resolve User & Verify Habit Ownership (IDOR defense)
+       ├─▶ Step 2: Validate Target Date (Reject future dates)
+       ├─▶ Step 3: Check Duplicate Logs (findByHabitIdAndLogDate)
+       ├─▶ Step 4 (Freeze only): Verify Token Balance (tokens >= 1) & Deduct 1 Token
+       ├─▶ Step 5: Save HabitLog Entity (usedStreakFreeze = true/false)
+       └─▶ Step 6: Return HabitLogResponseDto
+```
+
+---
+
+### 2. Deep Dive: Key Business Logic & Architecture Decisions
+
+#### 1. Why a Separate `HabitLogService` instead of putting everything in `HabitService`?
+- **Single Responsibility Principle (SRP):** `HabitService` handles habit metadata (creation, editing, deleting, streak calculations). `HabitLogService` handles the daily operational transactions and gamified token state mutations.
+- **Maintainability & Testing:** Decoupling daily logging keeps service classes small, focused, and easily unit-testable.
+
+#### 2. Two-Layer Duplicate Check Defense
+- **Layer 1 (Application / Service Level):**
+  ```java
+  if (habitLogRepository.findByHabitIdAndLogDate(habit.getId(), targetDate).isPresent()) {
+      throw new DuplicateResourceException("Habit is already logged for date: " + targetDate);
+  }
+  ```
+- **Layer 2 (Database Level):**
+  `@UniqueConstraint(columnNames = {"habit_id", "log_date"}, name = "uk_habit_log_date")` on the `habit_logs` table.
+- **Why both?** In concurrent environments where two requests hit the server at the exact same millisecond, both might pass Layer 1, but Layer 2 guarantees database consistency by throwing a unique key violation.
+
+#### 3. Why Block Future Dates?
+- `if (targetDate.isAfter(LocalDate.now())) throw new IllegalArgumentException(...)`
+- Logging future dates breaks calendar logic, distorts streak calculations, and allows cheating the habit tracker.
+
+#### 4. Transactional Atomic Token Deduction & Refund
+- Marked with `@Transactional`: If saving the `HabitLog` fails for any reason, the user's token deduction is automatically rolled back, preventing token loss.
+- In `deleteHabitLog()`: If `habitLog.isUsedStreakFreeze()` is `true`, the user's balance is automatically incremented (`streakFreezeTokens + 1`), ensuring fair token accounting.
+
+---
+
+### 3. Summary of Methods in `HabitLogService`
+
+| Method | Transaction | Description |
+|---|---|---|
+| `logHabitCompletion` | `@Transactional` | Validates ownership & non-duplicate date $\rightarrow$ saves `HabitLog` (`usedStreakFreeze = false`). |
+| `useStreakFreeze` | `@Transactional` | Verifies `tokens >= 1` $\rightarrow$ deducts 1 token $\rightarrow$ saves `HabitLog` (`usedStreakFreeze = true`). |
+| `getHabitLogs` | `@Transactional(readOnly = true)` | Fetches all logs for a habit sorted by date ascending. |
+| `deleteHabitLog` | `@Transactional` | Deletes a log for a date $\rightarrow$ refunds freeze token if log was a freeze. |
+
+---
+
+### 4. How to Explain This in an Interview (Fresher Cheatsheet)
+
+> **Q1: How do you prevent users from logging the same habit multiple times on the same day?**
+> *"We implement a two-layer defense:
+> 1. At the service layer, we check `habitLogRepository.findByHabitIdAndLogDate(habitId, date)` and throw a custom 409 `DuplicateResourceException` if a record exists.
+> 2. At the database layer, we define a composite unique constraint `UK(habit_id, log_date)` on the `habit_logs` table as a fail-safe against race conditions."*
+
+> **Q2: How does the Streak Freeze redemption maintain database consistency?**
+> *"Both the token deduction on the `users` table and the log insertion in the `habit_logs` table execute within a single `@Transactional` method. If any step fails (e.g. database constraint error), Spring automatically rolls back the entire transaction, ensuring no tokens are lost without creating the corresponding log."*
+
+> **Q3: What happens if a user accidentally logs a freeze and wants to undo it?**
+> *"In `deleteHabitLog`, our service checks `if (habitLog.isUsedStreakFreeze())`. If true, it automatically increments the user's `streakFreezeTokens` balance by 1 before deleting the log record, restoring their token."*
+
+---
+
+### ✅ Step 15 — Git Commit
+
+```bash
+git add .
+git commit -m "Step 15: Add HabitLogService - Habit check-in engine, streak freeze token redemption, and backdated logging"
+```
+
+---
+
+> **Next Step:** Step 16 — Habit Log Controller (`HabitLogController.java`)
 
