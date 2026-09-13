@@ -1612,6 +1612,8 @@ HabitLogService.logHabitCompletion() / useStreakFreeze()
 
 ---
 
+---
+
 ### ✅ Step 15 — Git Commit
 
 ```bash
@@ -1621,5 +1623,66 @@ git commit -m "Step 15: Add HabitLogService - Habit check-in engine, streak free
 
 ---
 
-> **Next Step:** Step 16 — Habit Log Controller (`HabitLogController.java`)
+## Phase 2 · Step 16 — Habit Log Controller (`HabitLogController.java`)
+
+---
+
+### 1. What is `HabitLogController`?
+
+`HabitLogController` is the **REST API gateway** for habit logging and streak freezes. It exposes nested RESTful endpoints under `/api/v1/habits/{habitId}/logs`.
+
+```
+Client (User Check-in / Freeze Request)
+       │ (HTTP POST/GET/DELETE + Bearer JWT)
+       ▼
+JwtAuthenticationFilter (Authenticates JWT token)
+       │
+       ▼
+HabitLogController (/api/v1/habits/{habitId}/logs)
+       │ (Extracts User email from Authentication & delegates to service)
+       ▼
+HabitLogService (Validations, Token Balance Mutations, Database Persistence)
+```
+
+---
+
+### 2. Key Design Decisions & Best Practices
+
+#### 1. Why Nested REST Resource Path (`/habits/{habitId}/logs`)?
+- **Hierarchical REST Design:** A `HabitLog` cannot exist independently without its parent `Habit`. In RESTful conventions, sub-resources that belong to a parent entity are nested under the parent URL path:
+  $$\text{/api/v1/habits/\{habitId\}/logs}$$
+- **Clear Context:** The URL explicitly signals which habit is being operated upon.
+
+#### 2. Optional Request Body (`@RequestBody(required = false)`)
+- For standard daily check-ins (`POST /api/v1/habits/1/logs`), clients do not need to send any JSON body. Spring gracefully handles an empty body, and the service defaults the completion date to `LocalDate.now()`.
+- For backdated logs or specific freeze dates, clients can send `{"logDate": "2026-09-10"}`.
+
+#### 3. Date Formatting with `@DateTimeFormat(iso = DateTimeFormat.ISO.DATE)`
+- In `DELETE /api/v1/habits/{habitId}/logs/{date}`, the `{date}` path variable is parsed into a Java `LocalDate`.
+- `@DateTimeFormat(iso = DateTimeFormat.ISO.DATE)` enforces strict ISO-8601 formatting (`YYYY-MM-DD`, e.g., `2026-09-12`). If the client passes an invalid format (like `12-09-2026`), Spring returns a clean `400 Bad Request`.
+
+---
+
+### 3. All Endpoints Exposed in Step 16
+
+| HTTP Verb | Route | Request Body | Response Body | Status Code | Description |
+|---|---|---|---|---|---|
+| `POST` | `/api/v1/habits/{habitId}/logs` | Optional `{"logDate": "..."}` | `HabitLogResponseDto` | `201 CREATED` | Log daily / backdated habit completion |
+| `POST` | `/api/v1/habits/{habitId}/logs/freeze` | Optional `{"logDate": "..."}` | `HabitLogResponseDto` | `201 CREATED` | Consume 1 freeze token to protect streak |
+| `GET` | `/api/v1/habits/{habitId}/logs` | None | `List<HabitLogResponseDto>` | `200 OK` | Fetch chronological completion history |
+| `DELETE` | `/api/v1/habits/{habitId}/logs/{date}` | None | None | `204 NO CONTENT` | Undo log (refunds token if it was a freeze) |
+
+---
+
+### 4. How to Explain This in an Interview (Fresher Cheatsheet)
+
+> **Q1: Why do we use nested paths like `/habits/{habitId}/logs` instead of a flat `/logs` endpoint?**
+> *"In REST API design, when a resource has a strict parent-child ownership relationship (a log cannot exist without a habit), nesting the sub-resource under the parent URL (`/habits/{habitId}/logs`) makes the hierarchy self-documenting and intuitive."*
+
+> **Q2: How does Spring parse a `LocalDate` from a URL `@PathVariable`?**
+> *"By annotating the `LocalDate` parameter with `@DateTimeFormat(iso = DateTimeFormat.ISO.DATE)`, Spring MVC automatically binds and validates standard ISO-8601 `YYYY-MM-DD` date strings from the URL path."*
+
+---
+
+> **Next Step:** Step 17 — Automated Daily 9:00 PM Email Reminder Engine (`EmailService.java` + `ReminderScheduler.java`)
 
