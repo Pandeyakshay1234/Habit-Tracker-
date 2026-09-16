@@ -1684,5 +1684,377 @@ HabitLogService (Validations, Token Balance Mutations, Database Persistence)
 
 ---
 
-> **Next Step:** Step 17 — Automated Daily 9:00 PM Email Reminder Engine (`EmailService.java` + `ReminderScheduler.java`)
+## Phase 3 · Step 17 — Automated Daily 9:00 PM Email Reminder Engine (`EmailService.java` + `ReminderScheduler.java`)
+
+---
+
+### 1. What is the Automated Reminder Engine?
+
+The reminder engine is an **asynchronous background task** that automatically runs every night at **9:00 PM** without requiring any incoming HTTP trigger.
+
+It identifies users who have pending habits today and dispatches a styled, responsive HTML email via **Gmail SMTP** (`JavaMailSender`) to motivate them to log before midnight.
+
+```
+                              9:00 PM Every Night (Cron)
+                                         │
+                                         ▼
+                                ReminderScheduler
+                                         │
+                 ┌───────────────────────┴───────────────────────┐
+                 ▼                                               ▼
+         HabitRepository                                    EmailService
+  "findHabitsNotLoggedOnDate"                     (Builds HTML & dispatches email
+(JPQL Subquery with JOIN FETCH)                        via JavaMailSender)
+                 │                                               │
+                 └───────────────────────┬───────────────────────┘
+                                         ▼
+                               User Inbox 📬 (HTML Digest)
+```
+
+---
+
+### 2. Deep Dive: Key Technical Decisions & Architecture
+
+#### 1. How Spring Background Scheduling Works (`@EnableScheduling` + `@Scheduled`)
+- `@EnableScheduling` on `HabitTrackerApplication` boots up Spring's background task executor.
+- `@Scheduled(cron = "0 0 21 * * *")` configures a standard 6-field cron expression:
+  $$\underbrace{0}_{\text{Second}} \quad \underbrace{0}_{\text{Minute}} \quad \underbrace{21}_{\text{Hour (9 PM)}} \quad \underbrace{*}_{\text{Day}} \quad \underbrace{*}_{\text{Month}} \quad \underbrace{*}_{\text{Day-of-Week}}$$
+
+#### 2. The Custom JPQL Query with `JOIN FETCH`
+```java
+@Query("""
+    SELECT h FROM Habit h 
+    JOIN FETCH h.user 
+    WHERE h.id NOT IN (
+        SELECT hl.habit.id FROM HabitLog hl WHERE hl.logDate = :targetDate
+    )
+""")
+List<Habit> findHabitsNotLoggedOnDate(@Param("targetDate") LocalDate targetDate);
+```
+- **Why `JOIN FETCH h.user`?** The `user` relationship on `Habit` is configured with `FetchType.LAZY`. Without `JOIN FETCH`, accessing `habit.getUser()` while grouping outside an active transaction would trigger `LazyInitializationException` or cause the **N+1 query problem** (firing 1 separate SQL query per habit). `JOIN FETCH` loads everything in a single efficient SQL JOIN.
+- **Why `NOT IN` subquery?** The database directly filters out any habit that already has a record in `habit_logs` for `targetDate`.
+
+#### 3. Grouping by User (`Collectors.groupingBy`)
+- A user might have 3 or 4 pending habits. If we iterated and sent 1 email per habit, the user would receive 4 separate emails.
+- By using `unloggedHabits.stream().collect(Collectors.groupingBy(Habit::getUser))`, we group habits by their owner and dispatch **one consolidated email** with a bulleted list of all pending habits.
+
+#### 4. Fail-Safe SMTP Handling
+- In `EmailService`, the send logic is wrapped in a `try-catch` block logging errors with `@Slf4j`.
+- If sending an email to one user fails (e.g. invalid email address or temporary network timeout), the exception is logged and caught so the loop continues smoothly for all other users.
+
+---
+
+### 3. How to Explain This in an Interview (Fresher Cheatsheet)
+
+> **Q1: How do you schedule background tasks in Spring Boot?**
+> *"We annotate the configuration or main application class with `@EnableScheduling` and annotate the target worker method with `@Scheduled(cron = "...")`. Spring automatically manages the thread pool and executes the method according to the cron schedule."*
+
+> **Q2: How do you prevent the N+1 query problem when processing lazy relationships in background jobs?**
+> *"In `HabitRepository`, we write a custom JPQL query with `JOIN FETCH h.user`. This forces Hibernate to perform an inner join and eagerly fetch the associated User entity in a single query, completely avoiding LazyInitializationException and N+1 query overhead."*
+
+> **Q3: What is the difference between SimpleMailMessage and MimeMessage in Spring?**
+> *"1. `SimpleMailMessage`: Supports only plain text emails without HTML styling or attachments.
+> 2. `MimeMessage` (with `MimeMessageHelper`): Supports rich HTML content, inline CSS, multipart attachments, and UTF-8 encoding, which we use to send styled habit reminder digest templates."*
+
+---
+
+## Phase 3 · Step 18 — User Analytics & Stats Dashboard (`AnalyticsService.java` + `AnalyticsController.java`)
+
+---
+
+### 1. What is the Analytics Dashboard?
+
+The Analytics Engine provides a **consolidated progress dashboard** for the logged-in user. It aggregates total habit counts, lifetime check-ins, highest streaks, active streak counts, and a 7-day adherence rate percentage.
+
+```
+Client (Dashboard View)
+       │ (HTTP GET /api/v1/analytics/summary + Bearer JWT)
+       ▼
+JwtAuthenticationFilter (Validates Token & populates SecurityContext)
+       │
+       ▼
+AnalyticsController (/analytics/summary)
+       │ (Extracts User email from Authentication)
+       ▼
+AnalyticsService (Aggregates Repositories & Calculates 7-Day Adherence %)
+       │
+       ▼
+AnalyticsResponseDto (JSON summary payload)
+```
+
+---
+
+### 2. Deep Dive: Key Technical Decisions & Calculations
+
+#### 1. 7-Day Adherence Rate Formula
+Adherence represents how consistently a user followed through on their planned habits over the last 7 days:
+
+$$\text{Weekly Adherence Rate (\%)} = \left( \frac{\text{Actual logs recorded between } (today - 6 \text{ days}) \text{ and } today}{\text{Total active habits} \times 7} \right) \times 100$$
+
+- **Why `Math.round(rate * 100.0) / 100.0`?** Rounds the float to 2 clean decimal places (e.g. `85.71%`) for clean frontend display.
+
+#### 2. Efficient Database Queries with Spring Data JPA
+- Rather than loading thousands of entity rows into JVM memory to call `.size()`, we use database aggregation:
+  - `habitLogRepository.countByHabitUserId(userId)` $\rightarrow$ `SELECT COUNT(hl.id) FROM habit_logs hl JOIN habits h ON hl.habit_id = h.id WHERE h.user_id = ?`
+  - `habitLogRepository.countByHabitUserIdAndLogDateBetween(userId, start, end)` $\rightarrow$ `SELECT COUNT(hl.id) FROM ... WHERE hl.log_date BETWEEN ? AND ?`
+- **Why?** Performing counts at the database index level is orders of magnitude faster and consumes virtually zero JVM memory.
+
+#### 3. Zero-Habit Safety Guard
+- If a brand-new user accesses the dashboard before creating any habits, `AnalyticsService` immediately returns zeroed-out metrics without throwing division-by-zero errors.
+
+---
+
+### 3. Endpoints Exposed in Step 18
+
+| HTTP Method | Route | Access | Request Body | Response Body | Status Code |
+|---|---|---|---|---|---|
+| `GET` | `/api/v1/analytics/summary` | Protected | None | `AnalyticsResponseDto` | `200 OK` |
+
+#### Sample Response (`GET /api/v1/analytics/summary`):
+```json
+{
+  "totalHabits": 3,
+  "totalCompletions": 18,
+  "highestStreakEver": 7,
+  "habitsWithActiveStreaks": 2,
+  "weeklyAdherenceRate": 85.71,
+  "remainingStreakFreezeTokens": 1
+}
+```
+
+---
+
+### 4. How to Explain This in an Interview (Fresher Cheatsheet)
+
+> **Q1: How do you optimize calculating aggregate user statistics in Spring Data JPA?**
+> *"Instead of fetching entity collections into application memory and using `.size()`, we use Spring Data JPA derived count queries like `countByHabitUserIdAndLogDateBetween()`. This executes a SQL `COUNT(*)` directly in MySQL, utilizing database indexes and avoiding heavy entity instantiation in JVM heap."*
+
+> **Q2: How do you handle edge cases like division-by-zero when calculating percentages?**
+> *"Before calculating percentages like `weeklyAdherenceRate`, we guard against `maxPossibleLogs == 0` (e.g., when a user has no habits). If zero, we return `0.0`, avoiding `NaN` or arithmetic exceptions."*
+
+---
+
+## Phase 3 · Step 19 — OpenAPI 3 / Swagger UI Interactive Documentation (`/swagger-ui.html`)
+
+---
+
+### 1. What is SpringDoc OpenAPI 3?
+
+SpringDoc OpenAPI is an industry-standard library for **automated REST API documentation** and **interactive testing**.
+
+It inspects all Spring MVC `@RestController` endpoints, `@RequestBody` DTO records, `@PathVariable` parameters, and generates:
+1. **Interactive Web UI:** `http://localhost:8080/api/v1/swagger-ui.html`
+2. **OpenAPI 3.0 JSON Contract:** `http://localhost:8080/api/v1/v3/api-docs`
+
+```
+Developer / Recruiter / Frontend Client
+       │ (Opens browser at /swagger-ui.html)
+       ▼
+Swagger UI Web Interface
+       ├─▶ 1. Clicks "Authorize" & pastes JWT Bearer Token
+       ├─▶ 2. Tests /auth/register, /auth/login
+       ├─▶ 3. Tests /habits (CRUD)
+       ├─▶ 4. Tests /habits/{id}/logs (Daily Check-ins & Streak Freezes)
+       └─▶ 5. Tests /analytics/summary (Dashboard Metrics)
+```
+
+---
+
+### 2. Deep Dive: Key Technical Decisions & Architecture
+
+#### 1. Why `springdoc-openapi-starter-webmvc-ui` (v2.3.0)?
+- In Spring Boot 3.x (Spring 6), the old `springfox-swagger2` library is completely broken and deprecated.
+- SpringDoc OpenAPI 2.x is the official, actively maintained standard built specifically for Spring Boot 3, Jakarta EE 10, and Java 17.
+
+#### 2. Global JWT Bearer Authentication Scheme (`OpenApiConfig.java`)
+```java
+@Bean
+public OpenAPI customOpenAPI() {
+    final String securitySchemeName = "Bearer Authentication";
+    return new OpenAPI()
+            .addSecurityItem(new SecurityRequirement().addList(securitySchemeName))
+            .components(new Components()
+                    .addSecuritySchemes(securitySchemeName,
+                            new SecurityScheme()
+                                    .name(securitySchemeName)
+                                    .type(SecurityScheme.Type.HTTP)
+                                    .scheme("bearer")
+                                    .bearerFormat("JWT")
+                    )
+            );
+}
+```
+- **Why?** Without this configuration, Swagger UI cannot send JWT tokens in the `Authorization: Bearer <token>` header, and all protected endpoints would fail with `401 Unauthorized`. With this config, a green **"Authorize"** button appears in the UI.
+
+#### 3. Security Whitelisting in `SecurityConfig.java`
+- Swagger UI assets must be publicly accessible without requiring a JWT token:
+  ```java
+  .requestMatchers(
+      "/api/v1/auth/**",
+      "/v3/api-docs/**",
+      "/v3/api-docs",
+      "/swagger-ui/**",
+      "/swagger-ui.html"
+  ).permitAll()
+  ```
+
+---
+
+### 3. Complete Application Endpoint Map
+
+| Category | HTTP Method | Endpoint | Description |
+|---|---|---|---|
+| **Auth** | `POST` | `/api/v1/auth/register` | Register new user + issue JWT |
+| | `POST` | `/api/v1/auth/login` | Authenticate credentials + issue JWT |
+| **Habits** | `POST` | `/api/v1/habits` | Create a new habit |
+| | `GET` | `/api/v1/habits` | Get all habits of logged-in user |
+| | `GET` | `/api/v1/habits/{id}` | Get single habit details |
+| | `PUT` | `/api/v1/habits/{id}` | Update habit name / description |
+| | `DELETE` | `/api/v1/habits/{id}` | Delete habit & associated logs |
+| **Logs** | `POST` | `/api/v1/habits/{id}/logs` | Check-in habit for today or past date |
+| | `POST` | `/api/v1/habits/{id}/logs/freeze` | Redeem 1 streak freeze token |
+| | `GET` | `/api/v1/habits/{id}/logs` | View chronological check-in history |
+| | `DELETE` | `/api/v1/habits/{id}/logs/{date}` | Undo check-in (auto-refunds freeze token) |
+| **Analytics**| `GET` | `/api/v1/analytics/summary` | User summary dashboard & adherence % |
+| **Docs** | `GET` | `/api/v1/swagger-ui.html` | Interactive Swagger UI Web Documentation |
+
+---
+
+### 4. How to Explain This in an Interview (Fresher Cheatsheet)
+
+> **Q1: Why do we use SpringDoc OpenAPI in Spring Boot 3 projects instead of Springfox?**
+> *"Spring Boot 3 transitioned from Java EE to Jakarta EE packages (`jakarta.*`). Springfox is abandoned and incompatible with Spring Boot 3. SpringDoc OpenAPI 2.x is the current industry standard, providing full OpenAPI 3.0 support, automatic documentation generation, and seamless integration with Spring MVC."*
+
+> **Q2: How do you configure Swagger UI to test JWT-protected endpoints?**
+> *"In an `@Configuration` class (`OpenApiConfig`), we register a custom `OpenAPI` bean that defines a `SecurityScheme` of type `HTTP`, scheme `bearer`, and bearerFormat `JWT`. We also apply a global `SecurityRequirement`. In `SecurityConfig`, we whitelist the Swagger UI paths (`/swagger-ui/**`, `/v3/api-docs/**`) in `permitAll()`, allowing clients to view the UI and authenticate with their tokens via the 'Authorize' modal."*
+
+---
+
+## Phase 4 · Step 20 — Enabling CORS for React Frontend (`SecurityConfig.java`)
+
+---
+
+### 1. What is CORS and Why Do We Need It?
+
+**CORS** stands for **Cross-Origin Resource Sharing**.
+* An **Origin** is defined by **Protocol + Host + Port** (e.g., `http://localhost:5173`).
+* By default, web browsers enforce the **Same-Origin Policy (SOP)**: a script running on `http://localhost:5173` (React Vite) cannot make AJAX/fetch requests to `http://localhost:8080` (Spring Boot) unless the server explicitly sends headers allowing that origin.
+* Without CORS configured in Spring Security, browser requests will fail with:
+  > `Access to XMLHttpRequest at 'http://localhost:8080/api/v1/auth/login' from origin 'http://localhost:5173' has been blocked by CORS policy.`
+
+---
+
+### 2. How CORS Works Under the Hood (Pre-flight Requests)
+
+1. When a browser sends a request with custom headers (e.g., `Authorization: Bearer <token>`) or `Content-Type: application/json`, it first fires an **HTTP `OPTIONS`** request (called a **Pre-flight request**).
+2. The pre-flight asks: *"Server, do you allow `http://localhost:5173` to make a `POST` request with the `Authorization` header?"*
+3. Our Spring Security `CorsConfigurationSource` bean responds with:
+   - `Access-Control-Allow-Origin: http://localhost:5173`
+   - `Access-Control-Allow-Methods: GET, POST, PUT, DELETE, PATCH, OPTIONS`
+   - `Access-Control-Allow-Headers: Authorization, Content-Type, Accept...`
+   - `Access-Control-Max-Age: 3600` (caches pre-flight response for 1 hour).
+4. Only then does the browser execute the actual `POST` or `GET` request!
+
+---
+
+### 3. Implementation in `SecurityConfig.java`
+
+```java
+@Bean
+public CorsConfigurationSource corsConfigurationSource() {
+    CorsConfiguration configuration = new CorsConfiguration();
+    // Allow Vite dev server and React production builds
+    configuration.setAllowedOrigins(List.of("http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"));
+    // Allow standard REST HTTP methods
+    configuration.setAllowedMethods(Arrays.asList("GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"));
+    // Allow JWT Bearer and JSON content headers
+    configuration.setAllowedHeaders(Arrays.asList("Authorization", "Content-Type", "Accept", "X-Requested-With", "Origin"));
+    configuration.setAllowCredentials(true);
+    configuration.setMaxAge(3600L); // Cache pre-flight for 1 hour
+
+    UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+    source.registerCorsConfiguration("/**", configuration);
+    return source;
+}
+```
+
+---
+
+## Phase 4 · Step 21 — React + Vite Project Setup & Single Page Architecture
+
+---
+
+### 1. What is a Single Page Application (SPA)?
+
+* In a traditional multi-page application, every click requests a brand new HTML page from the server.
+* In a **Single Page Application (SPA)** with React:
+  - The browser downloads **one HTML file (`index.html`)** containing `<div id="root"></div>`.
+  - React JavaScript runs in the browser, rendering components into that `div`.
+  - When the user clicks buttons or logs habits, React updates only the specific parts of the screen without refreshing the page.
+
+---
+
+### 2. File Structure & Responsibilities
+
+| File | Purpose | Analogy to Spring Boot |
+|---|---|---|
+| `package.json` | Defines project metadata, build scripts (`dev`, `build`), and dependencies | `pom.xml` |
+| `vite.config.js` | Configures development server port (`5173`) and React JSX compiler | `application.properties` |
+| `index.html` | The single HTML skeleton loaded by the browser | HTML view template |
+| `src/main.jsx` | Mounts the root React component onto DOM `<div id="root">` | `HabitTrackerApplication.java` |
+| `src/App.jsx` | The master container component holding all UI views | Root Controller / View Orchestrator |
+| `src/index.css` | Global styling, color variables, and glassmorphic card themes | Static CSS stylesheet |
+
+---
+
+### 3. Dependencies Explained
+
+* **`react` & `react-dom`**: Core library for component-based UI and Virtual DOM rendering.
+* **`axios`**: Promise-based HTTP client for calling Spring Boot REST endpoints with JWT authorization headers.
+* **`lucide-react`**: Lightweight SVG icon set (flames, snowflakes, checkmarks, trash cans).
+* **`canvas-confetti`**: Particle animation engine for rewarding habit completions and milestone streaks.
+
+---
+
+### 4. How to Explain This in an Interview (Fresher Cheatsheet)
+
+---
+
+## Phase 4 · Step 22 — CSS Design Tokens & Glassmorphism Design System (`src/index.css`)
+
+---
+
+### 1. What are CSS Custom Properties (CSS Variables)?
+
+* Defined in `:root`, CSS variables allow defining design tokens (colors, border radiuses, box shadows, transitions) in **one central place**.
+* Example:
+  ```css
+  :root {
+    --bg-primary: #0b0f19;
+    --primary: #6366f1;
+    --fire: #f97316;
+    --freeze: #06b6d4;
+    --success: #10b981;
+    --card-bg: rgba(17, 24, 39, 0.75);
+  }
+  ```
+
+---
+
+### 2. What is Glassmorphism?
+
+* **Glassmorphism** creates a frosted glass effect using:
+  1. Semi-transparent background: `background: rgba(17, 24, 39, 0.75);`
+  2. Backdrop blur filter: `backdrop-filter: blur(16px);`
+  3. Subtle translucent border: `border: 1px solid rgba(255, 255, 255, 0.08);`
+  4. Ambient shadow: `box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);`
+
+---
+
+### 3. How to Explain This in an Interview (Fresher Cheatsheet)
+
+> **Q: How did you design and structure the CSS for your Habit Tracker?**
+> *"I built a responsive, glassmorphic design system using Vanilla CSS with CSS Custom Properties (`:root` variables) for consistent theming. The dark-mode UI uses semi-transparent cards with `backdrop-filter: blur()`, CSS Grid for dynamic 1-to-3 column responsive habit cards, and semantic color accents (orange for fire streaks 🔥, cyan for streak freezes ❄️, and emerald for completions ✅)."*
+
+---
 

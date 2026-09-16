@@ -21,4 +21,10 @@ public interface HabitLogRepository extends JpaRepository<HabitLog, Long> {
 
     // Fetches all logs for a habit within a date range — used for weekly/monthly stats
     List<HabitLog> findByHabitIdAndLogDateBetween(Long habitId, LocalDate start, LocalDate end);
+
+    // Spring generates: SELECT COUNT(*) FROM habit_logs hl JOIN habits h ON hl.habit_id = h.id WHERE h.user_id = ?
+    long countByHabitUserId(Long userId);
+
+    // Counts total logs for a user within a specific date range (e.g. past 7 days)
+    long countByHabitUserIdAndLogDateBetween(Long userId, LocalDate start, LocalDate end);
 }
